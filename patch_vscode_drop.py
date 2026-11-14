@@ -84,6 +84,9 @@ AUTO_TRIES = 6
 AUTO_PAUSE_S = 5
 
 LOG_PATH = "~/Library/Logs/vscode-drop-fix.log"
+# The agent also runs once an hour: the same failure is notified once, until its kind or the VS Code
+# version changes; a successful run forgets it. The installer's --uninstall removes this folder.
+FAILED_PATH = Path("~/Library/Application Support/vscode-drop-fix/last-failure").expanduser()
 NOTIFY_TITLE = "VS Code Drop Fix"
 # The text goes as an argument, not inside the AppleScript string, so quotes cannot break it.
 NOTIFY_ARGV = ["/usr/bin/osascript",
@@ -112,6 +115,35 @@ def notify(msg: str) -> None:
             log(f"notification failed: osascript exit {r.returncode}: {r.stderr.strip()[:300]}")
     except (OSError, subprocess.SubprocessError) as err:
         log(f"notification failed: {err}")
+
+
+def notify_failure(kind: str, msg: str) -> None:
+    try:
+        ver = vs_version(read(paths()[1]))
+    except NotFound:
+        ver = "?"
+    key = f"{kind} {ver}"
+    try:
+        if FAILED_PATH.read_text(encoding="utf-8") == key:
+            log("already notified about this failure, not repeating")
+            return
+    except (OSError, UnicodeDecodeError):
+        pass
+    notify(msg)
+    try:
+        FAILED_PATH.parent.mkdir(parents=True, exist_ok=True)
+        FAILED_PATH.write_text(key, encoding="utf-8")
+    except OSError as e:
+        log(f"could not remember the notification (it will come again in an hour): {e}")
+
+
+def forget_failure() -> None:
+    try:
+        FAILED_PATH.unlink()
+    except FileNotFoundError:
+        pass
+    except OSError as e:
+        log(f"could not remove {FAILED_PATH}: {e}")
 
 
 def paths():
@@ -253,6 +285,7 @@ def auto() -> int:
                 ver = vs_version(read(paths()[1]))
                 notify(f"Re-applied the drop-without-Shift patch to VS Code {ver}. "
                        "Quit VS Code (Cmd+Q) and reopen it; a window reload is not enough.")
+            forget_failure()
             return 0
         except OSError as e:
             if not is_permission_error(e):
@@ -263,16 +296,18 @@ def auto() -> int:
                 continue
             # Retrying will not help: this is the macOS App Management protection.
             log(f"could not write VS Code files: {e}")
-            notify("macOS did not allow re-applying the drop-without-Shift patch to VS Code. "
-                   "Enable \"VS Code Drop Fix\" in System Settings → Privacy & Security → App Management.")
+            notify_failure("denied",
+                           "macOS did not allow re-applying the drop-without-Shift patch to VS Code. "
+                           "Enable \"VS Code Drop Fix\" in System Settings → Privacy & Security → App Management.")
             return 1
         except NotFound as e:
             err = e
             if i + 1 < AUTO_TRIES:
                 time.sleep(AUTO_PAUSE_S)
     log(f"not patched after {AUTO_TRIES} tries: {err}")
-    notify("VS Code changed and the drop-without-Shift patch no longer matches; nothing was "
-           f"modified. Details: {LOG_PATH}")
+    notify_failure("notfound",
+                   "VS Code changed and the drop-without-Shift patch no longer matches; nothing was "
+                   f"modified. Details: {LOG_PATH}")
     return 1
 
 

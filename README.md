@@ -25,7 +25,7 @@ python3 install.py --help
 
 Then quit VS Code with **Cmd+Q** and reopen it. The main process reads `product.json` once at startup; a window reload shows "Your Code installation appears to be corrupt".
 
-The installer copies the script to `~/Library/Application Support/vscode-drop-fix/` (a background agent reading from Downloads, Documents or Desktop triggers privacy prompts), builds `~/Applications/VS Code Drop Fix.app`, writes and loads `~/Library/LaunchAgents/local.vscode-drop-fix.plist`, then runs the patch once. Log: `~/Library/Logs/vscode-drop-fix.log`. If `VSCODE_APP` is set when you run the installer, the agent gets it too and also watches that app's folder. `--python` only works together with `--rebuild` once the app exists. Manual use: `python3 patch_vscode_drop.py [--check | --restore]`.
+The installer copies the script to `~/Library/Application Support/vscode-drop-fix/` (a background agent reading from Downloads, Documents or Desktop triggers privacy prompts), builds `~/Applications/VS Code Drop Fix.app`, writes and loads `~/Library/LaunchAgents/local.vscode-drop-fix.plist`, then runs the patch once. Log: `~/Library/Logs/vscode-drop-fix.log`. If `VSCODE_APP` is set when you run the installer, the agent gets it too and watches that app instead. `--python` only works together with `--rebuild` once the app exists. Manual use: `python3 patch_vscode_drop.py [--check | --restore]`.
 
 ## The App Management step
 
@@ -35,7 +35,7 @@ Enable it once: System Settings, Privacy & Security, App Management, switch on "
 
 ## After a VS Code update
 
-An update replaces the app and drops the patch. The agent runs at login and whenever `/Applications` changes. If the patch is in place it exits silently. Otherwise it re-applies it and shows a notification asking for Cmd+Q. If the app is mid-replacement or the code changed, it retries 6 times 5 seconds apart, then notifies that the patch no longer matches (nothing is modified). If macOS refuses the write, it notifies you to enable App Management.
+An update replaces the app and drops the patch. The agent runs at login, whenever the VS Code app is replaced, and once an hour as a safety net (a launchd watch on the `/Applications` folder itself does not fire when an app inside it is replaced, so the agent watches the app). If the patch is in place it exits silently; the check takes about a second. Otherwise it re-applies it and shows a notification asking for Cmd+Q. If the app is mid-replacement or the code changed, it retries 6 times 5 seconds apart, then notifies that the patch no longer matches (nothing is modified). If macOS refuses the write, it notifies you to enable App Management. A failure is notified once, not every hour, until it changes or a run succeeds.
 
 ## Caveats
 

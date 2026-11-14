@@ -101,8 +101,9 @@ class InstallTest(unittest.TestCase):
             p = plistlib.load(f)
         self.assertEqual(p["Label"], "local.vscode-drop-fix")
         self.assertEqual(p["ProgramArguments"], [str(self.exe())])
-        self.assertEqual(p["WatchPaths"], ["/Applications"])
+        self.assertEqual(p["WatchPaths"], ["/Applications/Visual Studio Code.app"])
         self.assertTrue(p["RunAtLoad"])
+        self.assertEqual(p["StartInterval"], 3600)
         self.assertEqual(p["ThrottleInterval"], 20)
         self.assertEqual(p["StandardOutPath"], str(self.log))
         self.assertEqual(p["StandardErrorPath"], str(self.log))
@@ -113,21 +114,24 @@ class InstallTest(unittest.TestCase):
         with open(self.plist, "rb") as f:
             return plistlib.load(f)
 
-    def test_plist_carries_vscode_app_and_watches_its_parent(self):
+    def test_plist_carries_vscode_app_and_watches_that_app(self):
         os.environ["VSCODE_APP"] = "/Users/x/Applications/Visual Studio Code.app"
         with mock.patch.object(ins, "build_app"):
             self.run_main("--python", str(self.probe))
         p = self.read_plist()
         self.assertEqual(p["EnvironmentVariables"], {"VSCODE_APP": "/Users/x/Applications/Visual Studio Code.app"})
-        self.assertEqual(p["WatchPaths"], ["/Applications", "/Users/x/Applications"])
+        self.assertEqual(p["WatchPaths"], ["/Users/x/Applications/Visual Studio Code.app"])
 
-    def test_plist_watch_paths_deduplicated_for_applications(self):
-        os.environ["VSCODE_APP"] = "/Applications/Code Insiders.app"
-        with mock.patch.object(ins, "build_app"):
-            self.run_main("--python", str(self.probe))
-        p = self.read_plist()
-        self.assertEqual(p["WatchPaths"], ["/Applications"])
-        self.assertEqual(p["EnvironmentVariables"], {"VSCODE_APP": "/Applications/Code Insiders.app"})
+    def test_plist_never_watches_a_folder_of_apps(self):
+        # A watch on /Applications itself never fires when an app in it is replaced (checked on macOS 26).
+        for app in ("/Applications/Code Insiders.app", "/Applications/./Visual Studio Code.app/"):
+            os.environ["VSCODE_APP"] = app
+            with mock.patch.object(ins, "build_app"):
+                self.run_main("--python", str(self.probe))
+            p = self.read_plist()
+            self.assertEqual(p["WatchPaths"], [os.path.abspath(app)])
+            self.assertNotIn("/Applications", p["WatchPaths"])
+            self.assertEqual(p["StartInterval"], 3600)
 
     def test_plist_without_vscode_app_has_no_environment(self):
         with mock.patch.object(ins, "build_app"):

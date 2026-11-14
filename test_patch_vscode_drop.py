@@ -46,6 +46,8 @@ class PatchTest(unittest.TestCase):
         mock.patch.object(pd, "APP_DIR", None).start()
         mock.patch.object(pd, "notify", lambda msg: self.notes.append(msg)).start()
         mock.patch.object(pd, "AUTO_PAUSE_S", 0).start()
+        self.failed = Path(self.tmp.name) / "state" / "last-failure"
+        mock.patch.object(pd, "FAILED_PATH", self.failed).start()
         self.notes = []
         self.addCleanup(mock.patch.stopall)
         self.addCleanup(self.tmp.cleanup)
@@ -288,6 +290,62 @@ class PatchTest(unittest.TestCase):
         self.assertEqual(len(self.notes), 1)
         self.assertIn("no longer matches", self.notes[0])
         self.assertNotIn("App Management", self.notes[0])
+
+    # The agent also runs once an hour: one failure must not notify every hour.
+    def test_auto_same_failure_notifies_once_until_version_changes(self):
+        broken = MAIN.replace("windowDidDragEnd", "windowDragEnded")
+        self.install(broken)
+        self.run_main("--auto")
+        code, out = self.run_main("--auto")
+        self.assertEqual(code, 1)
+        self.assertIn("not patched", out)
+        self.assertIn("already notified", out)
+        self.assertEqual(len(self.notes), 1)
+        self.install(broken, product_text(broken, ver="1.147.0"))
+        self.run_main("--auto")
+        self.assertEqual(len(self.notes), 2)
+
+    def test_auto_success_forgets_failure(self):
+        broken = MAIN.replace("windowDidDragEnd", "windowDragEnded")
+        self.install(broken)
+        self.run_main("--auto")
+        self.assertTrue(self.failed.exists())
+        self.install(MAIN)
+        code, _ = self.run_main("--auto")
+        self.assertEqual(code, 0)
+        self.assertFalse(self.failed.exists())
+        self.install(broken)
+        self.run_main("--auto")
+        self.assertEqual(len(self.notes), 3)  # failure, re-applied, failure again
+
+    def test_auto_denied_every_hour_notifies_once(self):
+        mock.patch.object(pd, "write_atomic",
+                          mock.Mock(side_effect=PermissionError(1, "Operation not permitted"))).start()
+        self.run_main("--auto")
+        code, out = self.run_main("--auto")
+        self.assertEqual(code, 1)
+        self.assertIn("could not write", out)
+        self.assertEqual(len(self.notes), 1)
+
+    def test_denied_then_notfound_are_different_failures(self):
+        deny = mock.patch.object(pd, "write_atomic",
+                                 mock.Mock(side_effect=PermissionError(1, "Operation not permitted")))
+        deny.start()
+        self.run_main("--auto")
+        deny.stop()
+        self.install(MAIN.replace("windowDidDragEnd", "windowDragEnded"))
+        self.run_main("--auto")
+        self.assertEqual(len(self.notes), 2)
+
+    def test_memory_not_writable_still_notifies_and_logs(self):
+        self.failed.parent.parent.mkdir(parents=True, exist_ok=True)
+        self.failed.parent.write_text("a file where the folder should be")
+        self.install(MAIN.replace("windowDidDragEnd", "windowDragEnded"))
+        self.run_main("--auto")
+        code, out = self.run_main("--auto")
+        self.assertEqual(code, 1)
+        self.assertIn("could not remember", out)
+        self.assertEqual(len(self.notes), 2)
 
     def test_auto_eacces_is_the_app_management_case(self):
         calls = []

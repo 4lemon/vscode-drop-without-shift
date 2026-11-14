@@ -12,7 +12,7 @@ What install does:
   2. builds ~/Applications/VS Code Drop Fix.app from launcher.c (clang + ad-hoc codesign).
      The app exists so that the macOS "App Management" permission can be given to it alone;
   3. writes ~/Library/LaunchAgents/local.vscode-drop-fix.plist and loads it with launchctl
-     (runs at login and whenever /Applications changes, e.g. a VS Code update);
+     (runs at login, whenever the VS Code app is replaced, e.g. by an update, and once an hour);
   4. runs the patch once.
 
 Needs: macOS, Xcode command line tools (clang, codesign), Python 3.9+.
@@ -43,7 +43,10 @@ CLANG = "/usr/bin/clang"
 CODESIGN = "/usr/bin/codesign"
 LAUNCHCTL = "/bin/launchctl"
 SYSTEM_PYTHON = "/usr/bin/python3"
-WATCH_PATH = "/Applications"
+DEFAULT_VSCODE_APP = "/Applications/Visual Studio Code.app"
+# launchd WatchPaths on the /Applications folder does not fire when an app in it is replaced: the event
+# names the app, not the folder. So the agent watches the app itself, and checks once an hour as well.
+CHECK_INTERVAL_S = 3600
 
 DENIED_MARKERS = ("Operation not permitted", "Permission denied")
 
@@ -86,20 +89,18 @@ def info_plist() -> dict:
 
 
 def agent_plist(exe: Path) -> dict:
-    watch = [WATCH_PATH]
+    app = DEFAULT_VSCODE_APP
     env = {}
     vscode_app = os.environ.get("VSCODE_APP")
     if vscode_app:
-        vscode_app = os.path.abspath(vscode_app)
-        env["VSCODE_APP"] = vscode_app
-        parent = os.path.dirname(vscode_app)
-        if parent not in watch:
-            watch.append(parent)
+        app = os.path.abspath(vscode_app)
+        env["VSCODE_APP"] = app
     plist = {
         "Label": LABEL,
         "ProgramArguments": [str(exe)],
-        "WatchPaths": watch,
+        "WatchPaths": [app],
         "RunAtLoad": True,
+        "StartInterval": CHECK_INTERVAL_S,
         "ThrottleInterval": 20,
         "StandardOutPath": str(LOG_FILE),
         "StandardErrorPath": str(LOG_FILE),
