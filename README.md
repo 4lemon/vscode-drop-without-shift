@@ -27,6 +27,8 @@ Then quit VS Code with **Cmd+Q** and reopen it. The main process reads `product.
 
 The installer copies the script to `~/Library/Application Support/vscode-drop-fix/` (a background agent reading from Downloads, Documents or Desktop triggers privacy prompts), builds `~/Applications/VS Code Drop Fix.app`, writes and loads `~/Library/LaunchAgents/local.vscode-drop-fix.plist`, then runs the patch once. Log: `~/Library/Logs/vscode-drop-fix.log`. If `VSCODE_APP` is set when you run the installer, the agent gets it too and watches that app instead. `--python` only works together with `--rebuild` once the app exists. Manual use: `python3 patch_vscode_drop.py [--check | --restore]`.
 
+`--check` also tells whether the patch is active in the running VS Code: it compares the start time of the main process (`ps`) with the modification time of `product.json` and prints either "the patch is active" or that VS Code started before the write and needs a full restart (Cmd+Q). If `ps` cannot see the process (for example inside a sandbox) or `--app-dir` is used, it says "not checked".
+
 ## The App Management step
 
 macOS only lets an app with the "App Management" permission modify another signed app. A launchd agent running python directly gets `Operation not permitted` when writing into VS Code. Granting that permission to python would let every python script modify any app, so the installer builds a tiny app instead. Its command is baked in at compile time (`python3 -I patch_vscode_drop.py --auto`) and it accepts no arguments, so the permission is useful for nothing else.

@@ -2,6 +2,7 @@
 import io
 import json
 import tempfile
+import time
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
@@ -10,6 +11,7 @@ from unittest import mock
 import patch_vscode_drop as pd
 
 REAL_NOTIFY = pd.notify
+REAL_MAIN_STARTED = pd.main_started
 
 # As in 1.145.2, plus a decoy with the same text in another class, \r\n and non-ASCII.
 MONITOR = ('var Fme=class extends x{constructor(o,e){super();let t=()=>{e()?.windowDidDragStart()},'
@@ -46,6 +48,8 @@ class PatchTest(unittest.TestCase):
         mock.patch.object(pd, "APP_DIR", None).start()
         mock.patch.object(pd, "notify", lambda msg: self.notes.append(msg)).start()
         mock.patch.object(pd, "AUTO_PAUSE_S", 0).start()
+        # Tests never look at real processes: by default VS Code is "not running".
+        mock.patch.object(pd, "main_started", lambda: None).start()
         self.failed = Path(self.tmp.name) / "state" / "last-failure"
         mock.patch.object(pd, "FAILED_PATH", self.failed).start()
         self.notes = []
@@ -395,6 +399,138 @@ class PatchTest(unittest.TestCase):
     def test_docstring_does_not_claim_shift_works(self):
         self.assertNotIn("Shift still works", pd.__doc__)
         self.assertIn("ignores a Shift-drop", pd.__doc__.replace("\n", " "))
+
+    # --check also says whether the patch is active in the running VS Code: the main process reads
+    # product.json once at launch, so a Reload Window after patching shows "corrupt".
+
+    def ps_out(self, stdout, code=0):
+        return mock.Mock(returncode=code, stdout=stdout, stderr="ps: denied" if code else "")
+
+    def test_main_started_takes_main_process_of_this_app_only(self):
+        exe = f"{self.app}/Contents/MacOS/Code"
+        out = (f"Thu Nov 12 18:12:41 2026     {exe}\n"
+               f"Sun Nov  1 08:00:00 2026     {self.app}/Contents/Frameworks/Code Helper.app/Contents/MacOS/Code Helper\n"
+               f"Sun Nov  1 08:00:00 2026     {self.app}/Contents/MacOS/sub/tool\n"
+               "Thu Oct  1 08:00:00 2026     /Applications/Other.app/Contents/MacOS/Other\n"
+               f"Mon Nov  2 09:05:00 2026     {exe}\n")
+        seen = []
+        with mock.patch.object(pd.subprocess, "run", lambda argv, **kw: seen.append(kw) or self.ps_out(out)):
+            got = REAL_MAIN_STARTED()
+        self.assertEqual(got, time.mktime((2026, 11, 2, 9, 5, 0, 0, 0, -1)),
+                         "earliest of the two main processes; day with a padded space")
+        self.assertEqual(seen[0]["env"]["LC_ALL"], "C")
+
+    def test_main_started_none_when_not_running(self):
+        with mock.patch.object(pd.subprocess, "run",
+                               lambda argv, **kw: self.ps_out("Sun Nov  1 08:00:00 2026     /bin/zsh\n")):
+            self.assertIsNone(REAL_MAIN_STARTED())
+
+    def test_main_started_ps_failure_raises(self):
+        with mock.patch.object(pd.subprocess, "run", lambda argv, **kw: self.ps_out("", code=1)):
+            with self.assertRaises(OSError):
+                REAL_MAIN_STARTED()
+
+    def test_check_warns_when_vscode_started_before_patch(self):
+        self.install(PATCHED)
+        mtime = self.product.stat().st_mtime
+        with mock.patch.object(pd, "main_started", lambda: mtime - 3600):
+            code, out = self.run_main("--check")
+        self.assertEqual(code, 0)
+        self.assertIn("patch applied", out)
+        self.assertIn("before product.json was written", out)
+        self.assertIn("Cmd+Q", out)
+
+    def test_check_says_effective_when_started_after_patch(self):
+        self.install(PATCHED)
+        mtime = self.product.stat().st_mtime
+        with mock.patch.object(pd, "main_started", lambda: mtime + 60):
+            _, out = self.run_main("--check")
+        self.assertIn("patch is active", out)
+        self.assertNotIn("Cmd+Q", out)
+
+    def test_check_without_ps_says_not_checked(self):
+        self.install(PATCHED)
+        def denied():
+            raise PermissionError(1, "Operation not permitted")
+        with mock.patch.object(pd, "main_started", denied):
+            code, out = self.run_main("--check")
+        self.assertEqual(code, 0)
+        self.assertIn("not checked", out)
+
+    def test_check_says_not_running(self):
+        self.install(PATCHED)
+        _, out = self.run_main("--check")
+        self.assertIn("VS Code is not running", out)
+
+    def test_check_stock_install_never_says_active(self):
+        # Review 23.11: stock VS Code (or a checksum mismatch) must not print "the patch is active".
+        # MAIN: stock; OLD_PATCH: applied in 2 places of 3 (an all()->any() mutant must die here).
+        for main, product in ((MAIN, None), (OLD_PATCH, None)):
+            self.install(main, product)
+            mtime = self.product.stat().st_mtime
+            with mock.patch.object(pd, "main_started", lambda: mtime + 60):
+                code, out = self.run_main("--check")
+            self.assertEqual(code, 0)
+            self.assertNotIn("the patch is active", out)
+            self.assertIn("not active in this install", out)
+            self.assertIn("applied only in part", out)
+
+    def test_check_checksum_mismatch_text_is_not_a_restart_hint(self):
+        # Patched everywhere but product.json holds the stock checksum: the patched JS loads, the
+        # "corrupt" warning comes from the checksum, a restart does not help.
+        self.install(PATCHED, product_text(MAIN))
+        mtime = self.product.stat().st_mtime
+        with mock.patch.object(pd, "main_started", lambda: mtime + 60):
+            code, out = self.run_main("--check")
+        self.assertEqual(code, 0)
+        self.assertNotIn("the patch is active", out)
+        self.assertNotIn("not active in this install", out)
+        self.assertIn("checksum in product.json does not match", out)
+        self.assertIn("does load", out)
+
+    def test_check_files_vanish_after_the_check_gives_clear_message(self):
+        self.install(PATCHED)
+        real = pd.run
+
+        def run_then_vanish(want, quiet=False):
+            r = real(want, quiet)
+            self.main.unlink()
+            return r
+        with mock.patch.object(pd, "run", run_then_vanish):
+            code, out = self.run_main("--check")
+        self.assertEqual(code, 1)
+        self.assertIn("could not re-read the files", out)
+
+    def test_check_product_without_checksum_after_the_check_gives_clear_message(self):
+        self.install(PATCHED)
+        real = pd.run
+
+        def run_then_break(want, quiet=False):
+            r = real(want, quiet)
+            self.product.write_text(json.dumps({"version": "1", "checksums": {}}))
+            return r
+        with mock.patch.object(pd, "run", run_then_break):
+            code, out = self.run_main("--check")
+        self.assertEqual(code, 1)
+        self.assertIn("found 0 times", out)
+
+    def test_check_with_app_dir_skips_process_lookup(self):
+        called = []
+        other = Path(self.tmp.name) / "linux" / "resources" / "app"
+        (other / "out" / "vs" / "workbench").mkdir(parents=True)
+        (other / "out" / pd.MAIN_REL).write_bytes(PATCHED.encode("utf-8"))
+        (other / "product.json").write_bytes(product_text(PATCHED).encode("utf-8"))
+        with mock.patch.object(pd, "main_started", lambda: called.append(1)):
+            _, out = self.run_main("--check", "--app-dir", str(other))
+        self.assertEqual(called, [])
+        self.assertIn("not checked", out)
+
+    def test_patch_does_not_look_at_processes(self):
+        called = []
+        with mock.patch.object(pd, "main_started", lambda: called.append(1)):
+            _, out = self.run_main()
+        self.assertEqual(called, [])
+        self.assertIn("Cmd+Q", out)
 
     def test_checksum_matches_vscode_format(self):
         # sha256 base64 without padding.

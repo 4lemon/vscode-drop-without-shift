@@ -37,7 +37,7 @@ files). A VS Code update
 reinstalls the app without the patch; --auto is for the launchd agent that re-applies it.
 
     python3 patch_vscode_drop.py              # apply the patch
-    python3 patch_vscode_drop.py --check      # only show the current state
+    python3 patch_vscode_drop.py --check      # only show the current state, and whether it is active in the running VS Code
     python3 patch_vscode_drop.py --restore    # remove the patch (back to stock VS Code)
     python3 patch_vscode_drop.py --auto       # for launchd: silent if applied; else patch and notify
 
@@ -273,6 +273,66 @@ def run(want, quiet: bool = False) -> bool:
     return True
 
 
+def main_started():
+    """When the main process of this VS Code was started, epoch seconds; None if it is not running.
+    Raises OSError if ps is unavailable (a sandbox may hide other processes)."""
+    exe = str(APP / "Contents" / "MacOS") + "/"
+    out = subprocess.run(["ps", "-axww", "-o", "lstart=,comm="], capture_output=True, text=True,
+                         env={**os.environ, "LC_ALL": "C"}, timeout=10)
+    if out.returncode != 0:
+        raise OSError(out.stderr.strip() or f"ps exited with code {out.returncode}")
+    starts = []
+    for line in out.stdout.splitlines():
+        # "Thu Nov 12 18:12:41 2026     /Applications/Visual Studio Code.app/Contents/MacOS/Code"
+        stamp, comm = line[:24], line[24:].strip()
+        if comm.startswith(exe) and "/" not in comm[len(exe):]:
+            starts.append(time.mktime(time.strptime(stamp.strip(), "%a %b %d %H:%M:%S %Y")))
+    return min(starts) if starts else None
+
+
+def patch_state() -> str:
+    """State of the files: "ok" (patch in every place, checksum matches), "mismatch" (patch in every
+    place, checksum does not match) or "missing" (not applied or applied only in part).
+    Raises NotFound / OSError like run()."""
+    main, product = paths()
+    text, ptext = read(main), read(product)
+    sums = list(SUM_KEY.finditer(ptext))
+    if len(sums) != 1:
+        raise NotFound(f"{product}: checksum of {MAIN_REL} found {len(sums)} times instead of one")
+    if not all(p for _, p, _ in locate(text)):
+        return "missing"
+    return "ok" if sums[0].group(2).rstrip("=") == checksum(text.encode("utf-8")) else "mismatch"
+
+
+def restart_note(product: Path, state: str = "ok") -> str:
+    """Is the patch active in the running VS Code? The main process reads product.json once at
+    launch, so if it started before the patch, windows hold the old checksum and a window reload
+    shows "installation appears to be corrupt". `state` is patch_state(): without "ok" the words
+    "the patch is active" would be false."""
+    def fmt(t):
+        return time.strftime("%Y-%m-%d %H:%M", time.localtime(t))
+    if state == "missing":
+        return ("the patch is not active in this install (not applied, or applied only in part): "
+                "restarting VS Code changes nothing until it is applied")
+    if state == "mismatch":
+        return ("the patch is in place everywhere, but the checksum in product.json does not match: the patched "
+                "code does load, but VS Code will show \"installation appears to be corrupt\"; a restart does "
+                "not fix that, run the script again to recompute the checksum")
+    if APP_DIR:
+        return "not checked whether VS Code was restarted after the patch (--app-dir given)"
+    try:
+        started = main_started()
+    except (OSError, subprocess.SubprocessError, ValueError) as e:
+        return f"not checked whether VS Code was restarted after the patch: cannot read processes ({e})"
+    if started is None:
+        return "VS Code is not running: the patch takes effect when it starts"
+    changed = product.stat().st_mtime
+    if started < changed:
+        return (f"VS Code started {fmt(started)}, before product.json was written ({fmt(changed)}): "
+                f"windows hold the old checksum. {RESTART_HINT}")
+    return f"VS Code started {fmt(started)}, after product.json was written ({fmt(changed)}): the patch is active"
+
+
 def is_permission_error(e: OSError) -> bool:
     return isinstance(e, PermissionError) or e.errno in (errno.EPERM, errno.EACCES)
 
@@ -334,7 +394,14 @@ def main() -> int:
     except OSError as e:
         log(f"write failed: {e}. Run --check to see the current state")
         return 1
-    if changed:
+    if a.check:
+        try:
+            state = patch_state()
+        except (NotFound, OSError) as e:
+            log(f"could not re-read the files after the check: {e}")
+            return 1
+        log(restart_note(paths()[1], state))
+    elif changed:
         log(RESTART_HINT)
     return 0
 
