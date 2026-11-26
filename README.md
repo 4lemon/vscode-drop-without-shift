@@ -4,6 +4,8 @@ If dragging a screenshot onto the Claude Code chat in VS Code opens it as an edi
 
 > **Disclaimer.** This was vibe-coded with Claude Code (an AI coding agent) for one person's Mac and is shared as is. It patches files inside a signed application and installs a background agent. Read the code before you run it. No warranty, no support: use it at your own risk (see [LICENSE](LICENSE)).
 
+> **Warning: on macOS 26 this can stop VS Code from starting.** On 22 Nov 2026 VS Code updated itself to 1.147.0, and the agent re-applied the patch to the new app within a second, before that version had ever been launched. On its first launch (26 Nov, macOS 26.5.1) Gatekeeper checked the new version, found the Microsoft signature broken and showed "Visual Studio Code is damaged and can't be opened. You should move it to the Trash." Earlier versions survived only because the patch went in after their first launch. Removing the patch did not help: macOS kept refusing the app until a fresh copy was put in place. The author has stopped using the patch. If you keep it, read [If macOS says VS Code is damaged](#if-macos-says-vs-code-is-damaged) first.
+
 ## Why it is VS Code, not the extension
 
 The extension's own drop handler does not check Shift. VS Code does, in two places:
@@ -45,7 +47,24 @@ An update replaces the app and drops the patch. The agent runs at login, wheneve
 - Affects all webviews, not only Claude Code.
 - With the patch, holding Shift over a webview does nothing (checked live): Shift still disables the webview, so the drop goes to VS Code, which ignores a Shift-drop there. To open a dropped file as a tab, drop it on the tab bar or the editor.
 - Needs a full quit (Cmd+Q), see above.
-- It modifies a signed application. Unsupported by Microsoft; use at your own risk. Originals are kept as `*.orig` next to the patched files (refreshed each time the patch is applied to unpatched files), and `--restore` puts them back byte for byte and then deletes each `*.orig` identical to the restored file, so uninstall leaves nothing behind. Whether VS Code's auto-update accepts the modified app is not verified; restore, update, then re-apply if it refuses.
+- It modifies a signed application, which breaks its signature: see the warning at the top. Unsupported by Microsoft; use at your own risk. Originals are kept as `*.orig` next to the patched files (refreshed each time the patch is applied to unpatched files), and `--restore` puts them back byte for byte and then deletes each `*.orig` identical to the restored file, so uninstall leaves nothing behind. VS Code's auto-update did replace the patched app twice (1.145.2 to 1.146.0, then 1.147.0).
+
+## If macOS says VS Code is damaged
+
+Click **Cancel**, not "Move to Trash". Your settings and extensions live outside the app (`~/Library/Application Support/Code`, `~/.vscode`), so nothing is lost either way, but there is no need to throw the app away. Steps that worked on 26 Nov 2026 (macOS 26.5.1, VS Code 1.147.0):
+
+1. Stop the agent and restore the original files: `python3 install.py --uninstall`. Writing into VS Code, and moving it in step 3, needs App Management for whatever runs the command: if you get `Operation not permitted`, give your terminal that permission or download a fresh VS Code instead of steps 1 to 3.
+2. Check the signature: `codesign --verify --deep --strict "/Applications/Visual Studio Code.app"` must print nothing. Any `file added` or `file modified` line means the app still differs from Microsoft's; a leftover `*.orig` inside the app is enough to break it, so move such files out.
+3. A valid signature is not enough. macOS remembers the rejection: the next launch still logged `GK evaluateScanResult: 3` and showed the same dialog, although `codesign`, `spctl --assess` and `syspolicy_check distribution` all passed. Replace the app with a fresh copy of itself:
+
+   ```
+   mkdir -p ~/vscode-fresh ~/vscode-rejected
+   ditto "/Applications/Visual Studio Code.app" ~/vscode-fresh/"Visual Studio Code.app"
+   mv "/Applications/Visual Studio Code.app" ~/vscode-rejected/
+   mv ~/vscode-fresh/"Visual Studio Code.app" /Applications/
+   ```
+
+   For macOS this is a new app, and it started normally. Delete `~/vscode-rejected` once it does. Reinstalling from code.visualstudio.com should work the same way. A reboot or `sudo killall syspolicyd` is reported elsewhere to clear the remembered result too ([Squirrel.Mac#334](https://github.com/Squirrel/Squirrel.Mac/issues/334), [openai/codex#25719](https://github.com/openai/codex/issues/25719)); not tried here.
 
 ## Windows and Linux (untested)
 
@@ -61,3 +80,5 @@ python3 patch_vscode_drop.py --app-dir "<install folder>/resources/app"
 ## Tested
 
 macOS 26, VS Code 1.145.2, Claude Code 2.1.319: the patch was applied, VS Code restarted with Cmd+Q, and a screenshot dropped on the chat without Shift attached to the message, with no "corrupt" warning. The agent re-applying the patch through the app bundle was also run once, after App Management was granted (with Homebrew Python; the installer's default `/usr/bin/python3` was not tried). `install.py` itself was tested only on a fake app in temporary directories (real clang and codesign, mocked launchctl), not end to end on a real machine. Windows and Linux: untested.
+
+macOS 26.5.1, VS Code 1.147.0: broke, see the warning at the top. The agent there was the author's private version of this one, with the same logic: watch the app, patch as soon as it is replaced.
